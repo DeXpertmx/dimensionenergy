@@ -38,3 +38,26 @@ Stage Summary:
 - DialogContent accessibility warning resolved — screen readers now have proper title in both processing and verification states
 - Volkern CRM integration should now work — API key is configured in .env
 - Dev server confirmed loading .env with all variables
+
+---
+Task ID: 3
+Agent: Main
+Task: Fix invoice extraction API — wrong content type for PDFs + error handling
+
+Work Log:
+- Identified root cause: extract-invoice API used `image_url` content type for ALL files including PDFs
+- Per VLM SDK docs, PDFs must use `file_url` type, not `image_url`
+- Rewrote extract-invoice/route.ts with:
+  - `buildContent()` helper that picks correct type based on MIME type
+  - `file_url` for PDFs/DOCX, `image_url` for JPG/PNG/WebP/GIF
+  - 60-second timeout for VLM calls with AbortController
+  - Detailed error logging (raw response preview, parsed fields)
+  - User-friendly error messages in Spanish (timeout, parse errors)
+  - Proper error differentiation (400, 500, 504 status codes)
+- Fixed package.json dev script: removed `| tee dev.log` pipe that was killing the Next.js process
+- Lint passes cleanly
+
+Stage Summary:
+- Invoice extraction now correctly handles both images (JPG/PNG/WebP) and documents (PDF)
+- Better error messages shown to users when extraction fails
+- Dev server stability improved by removing tee pipe from dev script
