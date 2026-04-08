@@ -25,37 +25,6 @@ Reglas:
 - Mantén los formatos originales cuando sea posible
 - Responde SOLO con el JSON, sin texto adicional ni markdown`;
 
-function getMimeType(fileName: string): string {
-  const ext = fileName?.split(".").pop()?.toLowerCase() || "";
-  if (ext === "png") return "image/png";
-  if (ext === "webp") return "image/webp";
-  if (ext === "gif") return "image/gif";
-  if (ext === "pdf") return "application/pdf";
-  return "image/jpeg";
-}
-
-function isDocumentType(mimeType: string): boolean {
-  return mimeType === "application/pdf" || mimeType === "application/docx" || mimeType === "application/txt";
-}
-
-function buildContent(prompt: string, fileBase64: string, mimeType: string) {
-  const dataUri = `data:${mimeType};base64,${fileBase64}`;
-
-  if (isDocumentType(mimeType)) {
-    // Use file_url for document types (PDF, DOCX, etc.)
-    return [
-      { type: "text" as const, text: prompt },
-      { type: "file_url" as const, file_url: { url: dataUri } },
-    ];
-  }
-
-  // Use image_url for image types (JPG, PNG, WebP, etc.)
-  return [
-    { type: "text" as const, text: prompt },
-    { type: "image_url" as const, image_url: { url: dataUri } },
-  ];
-}
-
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -68,63 +37,65 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const mimeType = getMimeType(fileName || "");
-    console.log(`[VLM] Processing invoice: ${fileName || "unknown"}, type: ${mimeType}, size: ${Math.round((fileBase64.length * 3) / 4 / 1024)}KB`);
-
     const zai = await ZAI.create();
 
-    const content = buildContent(EXTRACTION_PROMPT, fileBase64, mimeType);
+    // Determine MIME type from file name
+    const ext = fileName?.split(".").pop()?.toLowerCase() || "";
+    let mimeType = "image/jpeg";
+    if (ext === "png") mimeType = "image/png";
+    if (ext === "pdf") mimeType = "application/pdf";
+    if (ext === "webp") mimeType = "image/webp";
 
-    // Set a 60-second timeout for the VLM call
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000);
+    // Build the image URL - use data URI for base64
+    const imageUrl = `data:${mimeType};base64,${fileBase64}`;
 
-    let response;
-    try {
-      response = await zai.chat.completions.createVision({
-        messages: [
-          {
-            role: "user",
-            content,
-          },
-        ],
-        thinking: { type: "disabled" },
-      } as Parameters<typeof zai.chat.completions.createVision>[0]);
-    } finally {
-      clearTimeout(timeout);
-    }
+    const response = await zai.chat.completions.createVision({
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: EXTRACTION_PROMPT,
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: imageUrl,
+              },
+            },
+          ],
+        },
+      ],
+      thinking: { type: "disabled" },
+    });
 
-    const rawContent = response.choices?.[0]?.message?.content;
+    const content = response.choices[0]?.message?.content;
 
-    if (!rawContent) {
-      console.error("[VLM] Empty response from vision model");
+    if (!content) {
       return NextResponse.json(
-        { error: "No se pudo extraer información de la factura. El modelo no devolvió datos." },
+        { error: "No se pudo extraer información de la factura" },
         { status: 500 }
       );
     }
-
-    console.log("[VLM] Raw response length:", rawContent.length);
-    console.log("[VLM] Raw response preview:", rawContent.substring(0, 200));
 
     // Parse the JSON from the response (handle potential markdown wrapping)
     let extractedData;
     try {
       // Try direct parse first
-      extractedData = JSON.parse(rawContent);
+      extractedData = JSON.parse(content);
     } catch {
       // Try extracting JSON from markdown code blocks
-      const jsonMatch = rawContent.match(/```(?:json)?\s*([\s\S]*?)```/);
+      const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
       if (jsonMatch) {
         extractedData = JSON.parse(jsonMatch[1].trim());
       } else {
         // Try finding JSON object in the response
-        const objMatch = rawContent.match(/\{[\s\S]*\}/);
+        const objMatch = content.match(/\{[\s\S]*\}/);
         if (objMatch) {
           extractedData = JSON.parse(objMatch[0]);
         } else {
-          console.error("[VLM] Could not parse JSON from response:", rawContent);
-          throw new Error("No se pudo interpretar la respuesta del modelo como JSON");
+          throw new Error("Could not parse extraction result");
         }
       }
     }
@@ -133,8 +104,6 @@ export async function POST(request: NextRequest) {
       titular: extractedData.titular,
       cups: extractedData.cups,
       comercializadora: extractedData.comercializadora,
-      tarifa: extractedData.tarifa,
-      importe: extractedData.importe_total,
     });
 
     return NextResponse.json({
@@ -142,18 +111,9 @@ export async function POST(request: NextRequest) {
       data: extractedData,
     });
   } catch (error) {
-    const errMsg = error instanceof Error ? error.message : String(error);
-    console.error("[API] Error in extract-invoice:", errMsg);
-
-    if (errMsg.includes("abort") || errMsg.includes("timeout") || errMsg.includes("Timeout")) {
-      return NextResponse.json(
-        { error: "La extracción tardó demasiado. Inténtalo con una imagen más clara o más pequeña." },
-        { status: 504 }
-      );
-    }
-
+    console.error("[API] Error in extract-invoice:", error);
     return NextResponse.json(
-      { error: "Error al procesar la factura. Inténtalo de nuevo con un archivo diferente.", details: errMsg },
+      { error: "Error al procesar la factura", details: String(error) },
       { status: 500 }
     );
   }
