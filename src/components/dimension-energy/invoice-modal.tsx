@@ -92,22 +92,28 @@ export function InvoiceModal({ open, onClose, extractedData, onConfirm }: Invoic
     <Dialog open={open} onOpenChange={handleDialogChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto p-0 sm:max-w-2xl">
         {isProcessing ? (
-          <div className="flex flex-col items-center justify-center gap-4 py-16 px-6">
-            <div className="relative">
-              <div className="absolute inset-0 rounded-full bg-de-blue/20" style={{ animation: 'pulse-ring 2s ease-in-out infinite' }} />
-              <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-de-blue">
-                <Loader2 className="h-8 w-8 animate-spin text-white" />
+          <>
+            <DialogTitle className="sr-only">Analizando tu factura</DialogTitle>
+            <DialogDescription className="sr-only">
+              Extrayendo datos de la factura de electricidad
+            </DialogDescription>
+            <div className="flex flex-col items-center justify-center gap-4 py-16 px-6">
+              <div className="relative">
+                <div className="absolute inset-0 rounded-full bg-de-blue/20" style={{ animation: 'pulse-ring 2s ease-in-out infinite' }} />
+                <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-de-blue">
+                  <Loader2 className="h-8 w-8 animate-spin text-white" />
+                </div>
+              </div>
+              <div className="text-center">
+                <h3 className="mb-2 text-lg font-bold text-de-blue-dark">
+                  Analizando tu factura...
+                </h3>
+                <p className="text-sm text-de-text-light">
+                  Estamos extrayendo los datos de tu factura. Esto puede tardar unos segundos.
+                </p>
               </div>
             </div>
-            <div className="text-center">
-              <h3 className="mb-2 text-lg font-bold text-de-blue-dark">
-                Analizando tu factura...
-              </h3>
-              <p className="text-sm text-de-text-light">
-                Estamos extrayendo los datos de tu factura. Esto puede tardar unos segundos.
-              </p>
-            </div>
-          </div>
+          </>
         ) : (
           <>
             <DialogHeader className="p-6 pb-2">
