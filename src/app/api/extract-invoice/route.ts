@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { NextRequest, NextResponse } from "next/server";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
 const EXTRACTION_PROMPT = `Eres un experto en extracción de datos de facturas eléctricas españolas. Analiza esta imagen/documento de factura de electricidad y extrae la siguiente información.
 
 Responde ÚNICAMENTE en formato JSON válido con estos campos (usa null si no encuentras el dato):
@@ -23,7 +26,6 @@ Reglas:
 - El CUPS siempre empieza por ES
 - Mantén los formatos originales cuando sea posible
 - Responde SOLO con el JSON, sin texto adicional ni markdown`;
-
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -43,35 +45,13 @@ export async function POST(request: NextRequest) {
     if (ext === "pdf") mimeType = "application/pdf";
     if (ext === "webp") mimeType = "image/webp";
 
-    // Build the image URL - use data URI for base64
-    const imageUrl = `data:${mimeType};base64,${fileBase64}`;
+    console.log("[Gemini] Processing invoice extraction:", {
+      fileName,
+      mimeType,
+      fileSize: fileBase64.length,
+    });
 
-    // Use OpenRouter if API key is configured, otherwise fallback to z-ai SDK (sandbox only)
-    const openRouterKey = process.env.OPENROUTER_API_KEY;
-    let content: string;
-
-    if (openRouterKey) {
-      content = await callOpenRouter(imageUrl);
-    } else {
-      // Fallback to z-ai-web-dev-sdk (only works in sandbox)
-      const ZAI = (await import("z-ai-web-dev-sdk")).default;
-      const zai = await ZAI.create();
-
-      const response = await zai.chat.completions.createVision({
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: EXTRACTION_PROMPT },
-              { type: "image_url", image_url: { url: imageUrl } },
-            ],
-          },
-        ],
-        thinking: { type: "disabled" },
-      });
-
-      content = response.choices[0]?.message?.content;
-    }
+    const content = await callGoogleGemini(fileBase64, mimeType);
 
     if (!content) {
       return NextResponse.json(
@@ -98,7 +78,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    console.log("[VLM] Invoice extracted successfully:", {
+    console.log("[Gemini] Invoice extracted successfully:", {
       titular: extractedData.titular,
       cups: extractedData.cups,
       comercializadora: extractedData.comercializadora,
@@ -116,105 +96,49 @@ export async function POST(request: NextRequest) {
     );
   }
 }
+}
 
-// OpenRouter API call (works with any vision model)
-async function callOpenRouter(imageUrl: string): Promise<string> {
-  const apiKey = process.env.OPENROUTER_API_KEY!;
-  const model = process.env.OPENROUTER_MODEL || "google/gemma-4-26b-a4b-it:free";
-  const siteUrl = process.env.SITE_URL || "https://dimensionenergy.vercel.app";
-  const siteName = "Dimension Energy";
+// Google Gemini API call
+async function callGoogleGemini(fileBase64: string, mimeType: string): Promise<string> {
+  const apiKey = process.env.GOOGLE_AI_API_KEY;
 
-  console.log("[OpenRouter] Request:", {
-    model,
-    siteUrl,
-    siteName,
-    imageUrlLength: imageUrl.length,
-    imageUrlPreview: imageUrl.substring(0, 100) + "...",
-    hasApiKey: !!apiKey,
-  });
-
-  const maxRetries = 3;
-  let lastError: Error | null = null;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-          Referer: siteUrl,
-          "HTTP-Referer": siteUrl,
-          "X-OpenRouter-Title": siteName,
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            {
-              role: "user",
-              content: [
-                { type: "text", text: EXTRACTION_PROMPT },
-                { type: "image_url", image_url: { url: imageUrl } },
-              ],
-            },
-          ],
-          max_tokens: 1500,
-          temperature: 0,
-          top_p: 1,
-          response_format: { type: "json_object" },
-          plugins: [{ id: "response-healing" }],
-        }),
-        signal: AbortSignal.timeout(60000),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-
-        // Handle rate limiting with exponential backoff
-        if (response.status === 429) {
-          const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 10000); // Max 10 seconds
-          console.log(`[OpenRouter] Rate limited (attempt ${attempt}/${maxRetries}), retrying in ${backoffMs}ms...`);
-          await new Promise(resolve => setTimeout(resolve, backoffMs));
-          lastError = new Error(`OpenRouter API error (${response.status}): ${errorText}`);
-          continue;
-        }
-
-        console.error("[OpenRouter] API Error:", {
-          status: response.status,
-          statusText: response.statusText,
-          headers: Object.fromEntries(response.headers.entries()),
-          body: errorText,
-        });
-        throw new Error(`OpenRouter API error (${response.status}): ${errorText}`);
-      }
-
-      const data = await response.json();
-      const messageContent = data.choices?.[0]?.message?.content;
-
-      console.log("[OpenRouter] Response:", {
-        status: response.status,
-        model: data.model,
-        usage: data.usage,
-        contentLength: messageContent?.length,
-        contentPreview: messageContent?.substring(0, 200),
-      });
-
-      if (!messageContent) {
-        throw new Error("Respuesta vacía del modelo");
-      }
-
-      return messageContent;
-    } catch (error) {
-      lastError = error as Error;
-      if (attempt === maxRetries) {
-        break;
-      }
-      // For other errors, don't retry
-      if (!(error as Error).message.includes('429')) {
-        break;
-      }
-    }
+  if (!apiKey) {
+    throw new Error("GOOGLE_AI_API_KEY no está configurada");
   }
 
-  throw lastError || new Error("Failed to call OpenRouter API after retries");
+  console.log("[Gemini] Initializing with API key present:", !!apiKey);
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({
+    model: "gemini-1.5-flash",
+    generationConfig: {
+      temperature: 0,
+      topP: 1,
+      maxOutputTokens: 1500,
+      responseMimeType: "application/json",
+    },
+  });
+
+  // Convert base64 to Uint8Array
+  const imageData = Uint8Array.from(atob(fileBase64), c => c.charCodeAt(0));
+
+  const result = await model.generateContent([
+    EXTRACTION_PROMPT,
+    {
+      inlineData: {
+        data: imageData,
+        mimeType: mimeType,
+      },
+    },
+  ]);
+
+  const response = await result.response;
+  const text = response.text();
+
+  console.log("[Gemini] Response received:", {
+    textLength: text.length,
+    textPreview: text.substring(0, 200),
+  });
+
+  return text;
 }
