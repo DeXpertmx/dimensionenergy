@@ -96,7 +96,6 @@ export async function POST(request: NextRequest) {
     );
   }
 }
-}
 
 // Google Gemini API call
 async function callGoogleGemini(fileBase64: string, mimeType: string): Promise<string> {
