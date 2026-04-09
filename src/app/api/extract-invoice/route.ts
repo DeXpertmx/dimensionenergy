@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { NextRequest, NextResponse } from "next/server";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
 const EXTRACTION_PROMPT = `Eres un experto en extracción de datos de facturas eléctricas españolas. Analiza esta imagen/documento de factura de electricidad y extrae la siguiente información.
 
 Responde ÚNICAMENTE en formato JSON válido con estos campos (usa null si no encuentras el dato):
@@ -23,7 +26,6 @@ Reglas:
 - El CUPS siempre empieza por ES
 - Mantén los formatos originales cuando sea posible
 - Responde SOLO con el JSON, sin texto adicional ni markdown`;
-
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -43,34 +45,13 @@ export async function POST(request: NextRequest) {
     if (ext === "pdf") mimeType = "application/pdf";
     if (ext === "webp") mimeType = "image/webp";
 
-    // Provider priority: Gemini > z-ai SDK (sandbox only)
-    const geminiKey = process.env.GEMINI_API_KEY;
-    let content: string;
+    console.log("[Gemini] Processing invoice extraction:", {
+      fileName,
+      mimeType,
+      fileSize: fileBase64.length,
+    });
 
-    if (geminiKey) {
-      content = await callGemini(geminiKey, fileBase64, mimeType);
-    } else {
-      // Fallback to z-ai-web-dev-sdk (only works in sandbox)
-      const ZAI = (await import("z-ai-web-dev-sdk")).default;
-      const zai = await ZAI.create();
-
-      const imageUrl = `data:${mimeType};base64,${fileBase64}`;
-
-      const response = await zai.chat.completions.createVision({
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: EXTRACTION_PROMPT },
-              { type: "image_url", image_url: { url: imageUrl } },
-            ],
-          },
-        ],
-        thinking: { type: "disabled" },
-      });
-
-      content = response.choices[0]?.message?.content;
-    }
+    const content = await callGoogleGemini(fileBase64, mimeType);
 
     if (!content) {
       return NextResponse.json(
@@ -97,7 +78,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    console.log("[VLM] Invoice extracted successfully:", {
+    console.log("[Gemini] Invoice extracted successfully:", {
       titular: extractedData.titular,
       cups: extractedData.cups,
       comercializadora: extractedData.comercializadora,
@@ -116,57 +97,47 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// Google Gemini 1.5 Flash API call
-async function callGemini(
-  apiKey: string,
-  fileBase64: string,
-  mimeType: string
-): Promise<string> {
-  const model = process.env.GEMINI_MODEL || "gemini-1.5-flash";
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+// Google Gemini API call
+async function callGoogleGemini(fileBase64: string, mimeType: string): Promise<string> {
+  const apiKey = process.env.GOOGLE_AI_API_KEY;
 
-  const payload = {
-    contents: [
-      {
-        parts: [
-          { text: EXTRACTION_PROMPT },
-          {
-            inlineData: {
-              mimeType,
-              data: fileBase64,
-            },
-          },
-        ],
-      },
-    ],
+  if (!apiKey) {
+    throw new Error("GOOGLE_AI_API_KEY no está configurada");
+  }
+
+  console.log("[Gemini] Initializing with API key present:", !!apiKey);
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({
+    model: "gemini-1.5-flash",
     generationConfig: {
-      temperature: 0.1,
+      temperature: 0,
+      topP: 1,
       maxOutputTokens: 1500,
       responseMimeType: "application/json",
     },
-  };
-
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(60000),
   });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Gemini API error (${response.status}): ${errorText}`);
-  }
+  // Convert base64 to Uint8Array
+  const imageData = Uint8Array.from(atob(fileBase64), c => c.charCodeAt(0));
 
-  const data = await response.json();
-  const messageContent = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  const result = await model.generateContent([
+    EXTRACTION_PROMPT,
+    {
+      inlineData: {
+        data: imageData,
+        mimeType: mimeType,
+      },
+    },
+  ]);
 
-  if (!messageContent) {
-    const blockReason = data.candidates?.[0]?.finishReason;
-    throw new Error(
-      `Respuesta vacía del modelo${blockReason ? ` (finishReason: ${blockReason})` : ""}`
-    );
-  }
+  const response = await result.response;
+  const text = response.text();
 
-  return messageContent;
+  console.log("[Gemini] Response received:", {
+    textLength: text.length,
+    textPreview: text.substring(0, 200),
+  });
+
+  return text;
 }
