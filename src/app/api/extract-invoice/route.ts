@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import ZAI from "z-ai-web-dev-sdk";
 
 const EXTRACTION_PROMPT = `Eres un experto en extracción de datos de facturas eléctricas españolas. Analiza esta imagen/documento de factura de electricidad y extrae la siguiente información.
 
@@ -37,8 +36,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const zai = await ZAI.create();
-
     // Determine MIME type from file name
     const ext = fileName?.split(".").pop()?.toLowerCase() || "";
     let mimeType = "image/jpeg";
@@ -49,28 +46,32 @@ export async function POST(request: NextRequest) {
     // Build the image URL - use data URI for base64
     const imageUrl = `data:${mimeType};base64,${fileBase64}`;
 
-    const response = await zai.chat.completions.createVision({
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: EXTRACTION_PROMPT,
-            },
-            {
-              type: "image_url",
-              image_url: {
-                url: imageUrl,
-              },
-            },
-          ],
-        },
-      ],
-      thinking: { type: "disabled" },
-    });
+    // Check which AI provider to use
+    const aiProvider = process.env.AI_PROVIDER || "openai";
+    let content: string;
 
-    const content = response.choices[0]?.message?.content;
+    if (aiProvider === "openai") {
+      content = await callOpenAI(imageUrl);
+    } else {
+      // Fallback to z-ai-web-dev-sdk (only works in sandbox)
+      const ZAI = (await import("z-ai-web-dev-sdk")).default;
+      const zai = await ZAI.create();
+
+      const response = await zai.chat.completions.createVision({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: EXTRACTION_PROMPT },
+              { type: "image_url", image_url: { url: imageUrl } },
+            ],
+          },
+        ],
+        thinking: { type: "disabled" },
+      });
+
+      content = response.choices[0]?.message?.content;
+    }
 
     if (!content) {
       return NextResponse.json(
@@ -82,15 +83,12 @@ export async function POST(request: NextRequest) {
     // Parse the JSON from the response (handle potential markdown wrapping)
     let extractedData;
     try {
-      // Try direct parse first
       extractedData = JSON.parse(content);
     } catch {
-      // Try extracting JSON from markdown code blocks
       const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
       if (jsonMatch) {
         extractedData = JSON.parse(jsonMatch[1].trim());
       } else {
-        // Try finding JSON object in the response
         const objMatch = content.match(/\{[\s\S]*\}/);
         if (objMatch) {
           extractedData = JSON.parse(objMatch[0]);
@@ -117,4 +115,54 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
+}
+
+// OpenAI-compatible API call (works with OpenAI, DeepSeek, etc.)
+async function callOpenAI(imageUrl: string): Promise<string> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  const baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
+  const model = process.env.OPENAI_MODEL || "gpt-4o";
+
+  if (!apiKey) {
+    throw new Error(
+      "OPENAI_API_KEY no configurada. En Vercel, agrega esta variable de entorno."
+    );
+  }
+
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "user", content: EXTRACTION_PROMPT },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Aquí tienes la factura:" },
+            { type: "image_url", image_url: { url: imageUrl } },
+          ],
+        },
+      ],
+      max_tokens: 1500,
+    }),
+    signal: AbortSignal.timeout(60000),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`OpenAI API error (${response.status}): ${errorText}`);
+  }
+
+  const data = await response.json();
+  const messageContent = data.choices?.[0]?.message?.content;
+
+  if (!messageContent) {
+    throw new Error("Respuesta vacía del modelo");
+  }
+
+  return messageContent;
 }
