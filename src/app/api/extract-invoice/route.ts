@@ -120,7 +120,7 @@ export async function POST(request: NextRequest) {
 // OpenRouter API call (works with any vision model)
 async function callOpenRouter(imageUrl: string): Promise<string> {
   const apiKey = process.env.OPENROUTER_API_KEY!;
-  const model = process.env.OPENROUTER_MODEL || "z-ai/glm-4.5-air:free";
+  const model = process.env.OPENROUTER_MODEL || "google/gemma-4-31b-it:free";
   const siteUrl = process.env.SITE_URL || "https://dimensionenergy.vercel.app";
   const siteName = "Dimension Energy";
 
