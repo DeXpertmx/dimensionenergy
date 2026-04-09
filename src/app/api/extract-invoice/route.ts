@@ -124,13 +124,23 @@ async function callOpenRouter(imageUrl: string): Promise<string> {
   const siteUrl = process.env.SITE_URL || "https://dimensionenergy.vercel.app";
   const siteName = "Dimension Energy";
 
+  console.log("[OpenRouter] Request:", {
+    model,
+    siteUrl,
+    siteName,
+    imageUrlLength: imageUrl.length,
+    imageUrlPreview: imageUrl.substring(0, 100) + "...",
+    hasApiKey: !!apiKey,
+  });
+
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
+      Referer: siteUrl,
       "HTTP-Referer": siteUrl,
-      "X-Title": siteName,
+      "X-OpenRouter-Title": siteName,
     },
     body: JSON.stringify({
       model,
@@ -144,17 +154,35 @@ async function callOpenRouter(imageUrl: string): Promise<string> {
         },
       ],
       max_tokens: 1500,
+      temperature: 0,
+      top_p: 1,
+      response_format: { type: "json_object" },
+      plugins: [{ id: "response-healing" }],
     }),
     signal: AbortSignal.timeout(60000),
   });
 
   if (!response.ok) {
     const errorText = await response.text();
+    console.error("[OpenRouter] API Error:", {
+      status: response.status,
+      statusText: response.statusText,
+      headers: Object.fromEntries(response.headers.entries()),
+      body: errorText,
+    });
     throw new Error(`OpenRouter API error (${response.status}): ${errorText}`);
   }
 
   const data = await response.json();
   const messageContent = data.choices?.[0]?.message?.content;
+
+  console.log("[OpenRouter] Response:", {
+    status: response.status,
+    model: data.model,
+    usage: data.usage,
+    contentLength: messageContent?.length,
+    contentPreview: messageContent?.substring(0, 200),
+  });
 
   if (!messageContent) {
     throw new Error("Respuesta vacía del modelo");
