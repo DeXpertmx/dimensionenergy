@@ -120,7 +120,7 @@ export async function POST(request: NextRequest) {
 // OpenRouter API call (works with any vision model)
 async function callOpenRouter(imageUrl: string): Promise<string> {
   const apiKey = process.env.OPENROUTER_API_KEY!;
-  const model = process.env.OPENROUTER_MODEL || "google/gemma-4-31b-it:free";
+  const model = process.env.OPENROUTER_MODEL || "google/gemma-4-26b-a4b-it:free";
   const siteUrl = process.env.SITE_URL || "https://dimensionenergy.vercel.app";
   const siteName = "Dimension Energy";
 
@@ -133,60 +133,88 @@ async function callOpenRouter(imageUrl: string): Promise<string> {
     hasApiKey: !!apiKey,
   });
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      Referer: siteUrl,
-      "HTTP-Referer": siteUrl,
-      "X-OpenRouter-Title": siteName,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: EXTRACTION_PROMPT },
-            { type: "image_url", image_url: { url: imageUrl } },
-          ],
+  const maxRetries = 3;
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+          Referer: siteUrl,
+          "HTTP-Referer": siteUrl,
+          "X-OpenRouter-Title": siteName,
         },
-      ],
-      max_tokens: 1500,
-      temperature: 0,
-      top_p: 1,
-      response_format: { type: "json_object" },
-      plugins: [{ id: "response-healing" }],
-    }),
-    signal: AbortSignal.timeout(60000),
-  });
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: EXTRACTION_PROMPT },
+                { type: "image_url", image_url: { url: imageUrl } },
+              ],
+            },
+          ],
+          max_tokens: 1500,
+          temperature: 0,
+          top_p: 1,
+          response_format: { type: "json_object" },
+          plugins: [{ id: "response-healing" }],
+        }),
+        signal: AbortSignal.timeout(60000),
+      });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error("[OpenRouter] API Error:", {
-      status: response.status,
-      statusText: response.statusText,
-      headers: Object.fromEntries(response.headers.entries()),
-      body: errorText,
-    });
-    throw new Error(`OpenRouter API error (${response.status}): ${errorText}`);
+      if (!response.ok) {
+        const errorText = await response.text();
+
+        // Handle rate limiting with exponential backoff
+        if (response.status === 429) {
+          const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 10000); // Max 10 seconds
+          console.log(`[OpenRouter] Rate limited (attempt ${attempt}/${maxRetries}), retrying in ${backoffMs}ms...`);
+          await new Promise(resolve => setTimeout(resolve, backoffMs));
+          lastError = new Error(`OpenRouter API error (${response.status}): ${errorText}`);
+          continue;
+        }
+
+        console.error("[OpenRouter] API Error:", {
+          status: response.status,
+          statusText: response.statusText,
+          headers: Object.fromEntries(response.headers.entries()),
+          body: errorText,
+        });
+        throw new Error(`OpenRouter API error (${response.status}): ${errorText}`);
+      }
+
+      const data = await response.json();
+      const messageContent = data.choices?.[0]?.message?.content;
+
+      console.log("[OpenRouter] Response:", {
+        status: response.status,
+        model: data.model,
+        usage: data.usage,
+        contentLength: messageContent?.length,
+        contentPreview: messageContent?.substring(0, 200),
+      });
+
+      if (!messageContent) {
+        throw new Error("Respuesta vacía del modelo");
+      }
+
+      return messageContent;
+    } catch (error) {
+      lastError = error as Error;
+      if (attempt === maxRetries) {
+        break;
+      }
+      // For other errors, don't retry
+      if (!(error as Error).message.includes('429')) {
+        break;
+      }
+    }
   }
 
-  const data = await response.json();
-  const messageContent = data.choices?.[0]?.message?.content;
-
-  console.log("[OpenRouter] Response:", {
-    status: response.status,
-    model: data.model,
-    usage: data.usage,
-    contentLength: messageContent?.length,
-    contentPreview: messageContent?.substring(0, 200),
-  });
-
-  if (!messageContent) {
-    throw new Error("Respuesta vacía del modelo");
-  }
-
-  return messageContent;
+  throw lastError || new Error("Failed to call OpenRouter API after retries");
 }
